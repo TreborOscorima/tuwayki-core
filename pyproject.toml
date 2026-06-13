@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=72", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tuwayki-core"
+version = "1.0.0"
+description = "Shared platform code for TUWAYKIAPP products"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlmodel>=0.0.21",
+    "sqlalchemy>=2.0",
+    "aiomysql>=0.2",
+    "PyMySQL>=1.1",
+    "cryptography>=42",
+    "PyJWT>=2.8",
+    "python-dotenv>=1.0",
+    "openpyxl>=3.1",
+    "reportlab>=4.2",
+    "redis>=5.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tuwayki_core*"]
