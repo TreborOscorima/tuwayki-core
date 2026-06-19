@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 from typing import Any
 
 import jwt
 from dotenv import load_dotenv
-from jwt import ExpiredSignatureError, PyJWTError
+from jwt import ExpiredSignatureError, InvalidSignatureError, PyJWTError
+
+logger = logging.getLogger("tuwayki_core.auth")
 
 from tuwayki_core.constants import TOKEN_EXPIRY_HOURS, REFRESH_TOKEN_EXPIRY_DAYS
 
@@ -56,10 +59,16 @@ def decode_token(token: str) -> dict | None:
     if not token:
         return None
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            token, SECRET_KEY, algorithms=[ALGORITHM],
+            leeway=datetime.timedelta(seconds=10),
+        )
         if not payload.get("sub"):
             return None
         return payload
+    except InvalidSignatureError:
+        logger.warning("JWT firma inválida — posible token manipulado", extra={"token_prefix": token[:20]})
+        return None
     except (ExpiredSignatureError, PyJWTError):
         return None
 
@@ -91,12 +100,18 @@ def decode_refresh_token(token: str) -> dict | None:
     if not token:
         return None
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            token, SECRET_KEY, algorithms=[ALGORITHM],
+            leeway=datetime.timedelta(seconds=10),
+        )
         if payload.get("typ") != "refresh":
             return None
         if not payload.get("sub"):
             return None
         return payload
+    except InvalidSignatureError:
+        logger.warning("JWT refresh firma inválida — posible token manipulado", extra={"token_prefix": token[:20]})
+        return None
     except (ExpiredSignatureError, PyJWTError):
         return None
 
