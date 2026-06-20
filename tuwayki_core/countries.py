@@ -186,6 +186,15 @@ def get_country_config(country_code: str) -> dict:
     return SUPPORTED_COUNTRIES.get(country_code, SUPPORTED_COUNTRIES["PE"])
 
 
+def get_country_config_by_currency(currency_code: str) -> dict:
+    """Returns country config whose currency matches currency_code (default: PE/PEN)."""
+    currency_code = (currency_code or "PEN").upper()
+    for config in SUPPORTED_COUNTRIES.values():
+        if config.get("currency", "").upper() == currency_code:
+            return config
+    return SUPPORTED_COUNTRIES["PE"]
+
+
 # ============================================================================
 # PAYMENT METHODS BY COUNTRY
 # ============================================================================
