@@ -106,6 +106,7 @@ CASHBOX_INCOME_ACTIONS: set[str] = {
     "Ingreso Cuota",
     "Amortizacion",
     "Pago Credito",
+    "ingreso_caja_chica",
 }
 
 CASHBOX_EXPENSE_ACTIONS: set[str] = {
