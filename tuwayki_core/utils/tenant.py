@@ -212,11 +212,18 @@ def _apply_tenant_criteria(orm_execute_state) -> None:
 
     _ensure_models_fresh()
 
+    # IMPORTANTE: el valor del tenant va como variable de CLOSURE, no como
+    # argumento por defecto. SQLAlchemy rastrea las variables de closure de la
+    # lambda y las convierte en bindparams (cache-safe); un default arg
+    # (`_bid=branch_id`) NO se rastrea y hornea el PRIMER valor en la caché de
+    # statements → al cambiar de sucursal se reutiliza el branch anterior y las
+    # queries del nuevo branch devuelven vacío. (company_id/branch_id son
+    # constantes dentro de esta llamada, así que el late-binding es correcto.)
     for model in _TENANT_COMPANY_MODELS:
         statement = statement.options(
             with_loader_criteria(
                 model,
-                lambda cls, _cid=company_id: cls.company_id == _cid,
+                lambda cls: cls.company_id == company_id,
                 include_aliases=True,
             )
         )
@@ -226,7 +233,7 @@ def _apply_tenant_criteria(orm_execute_state) -> None:
             statement = statement.options(
                 with_loader_criteria(
                     model,
-                    lambda cls, _bid=branch_id: cls.branch_id == _bid,
+                    lambda cls: cls.branch_id == branch_id,
                     include_aliases=True,
                 )
             )
