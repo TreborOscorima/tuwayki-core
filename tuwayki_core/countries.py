@@ -299,6 +299,56 @@ def get_country_config_by_currency(currency_code: str) -> dict:
     return SUPPORTED_COUNTRIES["PE"]
 
 
+# Zonas IANA secundarias de países soportados (la principal está en cada config).
+_EXTRA_TIMEZONES: dict[str, str] = {
+    "Pacific/Galapagos": "EC",
+    "America/Punta_Arenas": "CL",
+    "Pacific/Easter": "CL",
+    "America/Cancun": "MX",
+    "America/Merida": "MX",
+    "America/Monterrey": "MX",
+    "America/Matamoros": "MX",
+    "America/Chihuahua": "MX",
+    "America/Ciudad_Juarez": "MX",
+    "America/Ojinaga": "MX",
+    "America/Mazatlan": "MX",
+    "America/Bahia_Banderas": "MX",
+    "America/Hermosillo": "MX",
+    "America/Tijuana": "MX",
+}
+
+
+def country_code_from_timezone(timezone: str | None) -> str | None:
+    """País soportado (ISO-2) de una zona IANA, o None si no se reconoce.
+
+    Ej.: "America/Lima" → "PE"; "America/Argentina/Cordoba" → "AR".
+    """
+    tz = (timezone or "").strip()
+    if not tz:
+        return None
+    for code, config in SUPPORTED_COUNTRIES.items():
+        if config.get("timezone") == tz:
+            return code
+    if tz.startswith("America/Argentina/"):
+        return "AR"
+    return _EXTRA_TIMEZONES.get(tz)
+
+
+def country_code_for_currency(currency_code: str | None) -> str | None:
+    """País soportado cuya moneda local es ``currency_code``, o None.
+
+    A diferencia de get_country_config_by_currency, no cae a Perú: una moneda
+    desconocida devuelve None. USD → "EC" (único país soportado con dólar local).
+    """
+    code = (currency_code or "").strip().upper()
+    if not code:
+        return None
+    for country, config in SUPPORTED_COUNTRIES.items():
+        if config.get("currency", "").upper() == code:
+            return country
+    return None
+
+
 # ============================================================================
 # PAYMENT METHODS BY COUNTRY
 # ============================================================================
