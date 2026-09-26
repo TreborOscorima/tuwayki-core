@@ -35,11 +35,28 @@ formateo de moneda, exportaciones, timezone, etc.) reutilizadas por los tres sis
 | `tuwayki_core.utils.sanitization` · `validators` | Saneamiento y validación de entrada |
 | `tuwayki_core.utils.rate_limit` | Rate limiting (Redis) |
 | `tuwayki_core.utils.db` · `env` · `logger` · `performance` | Infra: conexión DB, entorno, logging, métricas |
+| `tuwayki_core.fiscal` | **Facturación electrónica** compartida (ver abajo) |
+
+### Facturación electrónica (`tuwayki_core.fiscal`)
+
+Conectores por país **sin base de datos ni credenciales guardadas**: cada sistema arma un
+`Document` (precios con impuesto incluido), llama al conector con las credenciales YA descifradas
+de la empresa y guarda el `IssueResult` en su propia tabla.
+
+| Módulo | Qué hace |
+|---|---|
+| `fiscal.models` | `Document`, `Line`, `Buyer`, `Reference`, `IssueResult`; estados `autorizado` / `pendiente` / `rechazado` / `error` (`retryable` = reintentar el mismo número) |
+| `fiscal.amounts` | Base + impuesto por línea; la cabecera siempre es la suma del detalle. La tasa sale de la empresa (Perú: 18 %, MYPE restaurantes 10,5 % en 2026) |
+| `fiscal.peru_nubefact` | Perú vía Nubefact (manual JSON v3.0): emitir, consultar, anular. Valida antes de llamar (RUC, DNI, serie F/B, boleta ≥ S/ 700 con documento) y reintenta seguro con `codigo_unico` (código 23 → consulta) |
+| `fiscal.argentina` | Argentina vía ARCA (WSAA + WSFEv1): factura A/B/C, `CondicionIVAReceptorId` (RG 5616), Factura C con el subtotal en `ImpNeto`; tras un corte consulta el número (FECompConsultar) antes de darlo por fallido |
+
+Pendiente de probar contra los entornos reales: requiere una cuenta de Nubefact (RUC de la
+empresa) y un certificado de homologación de ARCA (CUIT). Tests: `pytest tests/`.
 
 ### Dependencias
 
-`sqlmodel`, `sqlalchemy>=2.0`, `aiomysql`, `PyMySQL`, `cryptography`, `PyJWT`, `python-dotenv`,
-`openpyxl`, `reportlab`, `redis`. (Sin dependencias de framework web.)
+`sqlmodel`, `sqlalchemy>=2.0`, `aiomysql`, `PyMySQL`, `cryptography`, `defusedxml`, `PyJWT`,
+`httpx`, `python-dotenv`, `openpyxl`, `reportlab`, `redis`. (Sin dependencias de framework web.)
 
 ---
 
