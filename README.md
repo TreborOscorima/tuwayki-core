@@ -47,8 +47,9 @@ de la empresa y guarda el `IssueResult` en su propia tabla.
 |---|---|
 | `fiscal.models` | `Document`, `Line`, `Buyer`, `Reference`, `IssueResult`; estados `autorizado` / `pendiente` / `rechazado` / `error` (`retryable` = reintentar el mismo número) |
 | `fiscal.amounts` | Base + impuesto por línea; la cabecera siempre es la suma del detalle. La tasa sale de la empresa (Perú: 18 %, MYPE restaurantes 10,5 % en 2026) |
-| `fiscal.peru_nubefact` | Perú vía Nubefact (manual JSON v3.0): emitir, consultar, anular. Valida antes de llamar (RUC, DNI, serie F/B, boleta ≥ S/ 700 con documento) y reintenta seguro con `codigo_unico` (código 23 → consulta) |
+| `fiscal.peru_nubefact` | Perú vía Nubefact (manual JSON v3.0): emitir, consultar, anular. Valida antes de llamar (RUC, DNI, serie F/B, boleta ≥ S/ 700 con documento) y reintenta seguro con `codigo_unico` (código 23 → consulta). `verify_credentials`: prueba la ruta y el token de una empresa sin emitir |
 | `fiscal.argentina` | Argentina vía ARCA (WSAA + WSFEv1): factura A/B/C, `CondicionIVAReceptorId` (RG 5616), Factura C con el subtotal en `ImpNeto`; tras un corte consulta el número (FECompConsultar) antes de darlo por fallido |
+| `fiscal.argentina_certificate` | Certificado de ARCA sin OpenSSL: genera la clave RSA y la solicitud (CSR) con el formato de ARCA (`alias` = nombre del sistema) y avisa si el certificado no corresponde a la clave o a otro CUIT |
 
 Pendiente de probar contra los entornos reales: requiere una cuenta de Nubefact (RUC de la
 empresa) y un certificado de homologación de ARCA (CUIT). Tests: `pytest tests/`.

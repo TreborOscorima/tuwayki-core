@@ -7,6 +7,7 @@ comprobante y las credenciales, y devuelve un ``IssueResult``.
 
 Operaciones: ``issue`` (generar_comprobante), ``query`` (consultar_comprobante),
 ``void`` (generar_anulacion) y ``query_void`` (consultar_anulacion).
+``verify_credentials`` prueba la ruta y el token de una empresa sin emitir.
 
 Reintentos seguros: se envía ``codigo_unico``; si Nubefact responde que el
 documento ya existe (código 23, p. ej. tras un timeout), se consulta y se
@@ -30,7 +31,7 @@ from tuwayki_core.fiscal.models import (
     TaxCategory,
     Totals,
 )
-from tuwayki_core.utils.fiscal_validators import validate_ruc
+from tuwayki_core.utils.fiscal_validators import validate_nubefact_url, validate_ruc
 
 logger = logging.getLogger(__name__)
 
@@ -491,3 +492,46 @@ class NubefactClient:
         result = parse_document_response(data)
         result.request = payload
         return result
+
+
+# ── Verificación de credenciales ──────────────────────────────────────────
+
+# Respuestas que indican que la ruta o el token no sirven (o que no hubo
+# conexión). Cualquier otra respuesta de Nubefact prueba que los aceptó.
+_CREDENTIAL_ERRORS = {"10", "11", "12", "50", "51", "timeout", "conexion", "config"}
+
+
+async def verify_credentials(
+    url: str,
+    token: str,
+    series: str = "B001",
+    *,
+    timeout: float = TIMEOUT_SECONDS,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> tuple[bool, str]:
+    """Prueba la ruta y el token de una empresa sin emitir nada.
+
+    Consulta un comprobante que no existe: si Nubefact contesta "no existe"
+    (código 24), la ruta y el token son válidos. Devuelve (ok, mensaje para
+    mostrar).
+    """
+    ok, error = validate_nubefact_url(url)
+    if not ok:
+        return False, error
+    if not (token or "").strip():
+        return False, "Falta el token de Nubefact."
+    client = NubefactClient(url, token, timeout=timeout, transport=transport)
+    try:
+        result = await client.query(
+            DocumentType.RECEIPT, (series or "B001").strip().upper(), 99_999_999
+        )
+    except Exception as exc:  # p. ej. una ruta que httpx no puede usar
+        detail = _sanitize(str(exc))[:200]
+        logger.warning("Verificación de Nubefact falló: %s", detail)
+        return False, f"No se pudo conectar con Nubefact: {detail}"
+    code = str(result.error_code or "")
+    # Los códigos de Nubefact tienen 2 dígitos; 3 dígitos es un error HTTP
+    # (p. ej. 404 si la ruta apunta a otro servidor).
+    if code in _CREDENTIAL_ERRORS or (code.isdigit() and int(code) >= 100):
+        return False, result.message or "Nubefact rechazó la ruta o el token."
+    return True, "Nubefact aceptó la ruta y el token de la empresa."

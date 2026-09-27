@@ -6,8 +6,11 @@ de la empresa y guarda el ``IssueResult`` en su propia tabla.
 
 - ``models``: Document, Line, Buyer, IssueResult, estados.
 - ``amounts``: base + impuesto desde precios con impuesto incluido.
-- ``peru_nubefact``: Perú (SUNAT) vía Nubefact.
+- ``peru_nubefact``: Perú (SUNAT) vía Nubefact, y la verificación de la ruta y
+  el token de una empresa.
 - ``argentina``: Argentina (ARCA) vía WSAA + WSFEv1.
+- ``argentina_certificate``: clave privada y solicitud (CSR) del certificado
+  de ARCA, y control del par certificado + clave.
 """
 from tuwayki_core.fiscal.amounts import compute_totals, split_tax
 from tuwayki_core.fiscal.models import (

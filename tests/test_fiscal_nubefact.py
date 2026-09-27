@@ -251,3 +251,45 @@ def test_anulacion_queda_pendiente_con_ticket():
     assert r.status == FiscalStatus.PENDING and r.authorization_code == "1494358661332"
     assert srv.payload()["operacion"] == "generar_anulacion"
     assert srv.payload()["motivo"] == "Error del sistema"
+
+
+# ── Verificar la ruta y el token de una empresa ─────────────────────────
+
+def _verify(srv: _Nubefact, url: str = URL, token: str = TOKEN):
+    return _run(nf.verify_credentials(url, token, "B001", transport=httpx.MockTransport(srv)))
+
+
+def test_verificar_ok_si_responde_que_el_comprobante_no_existe():
+    srv = _Nubefact((400, {"errors": "Este documento no existe", "codigo": 24}))
+    ok, message = _verify(srv)
+    assert ok is True and "aceptó" in message
+    # Solo consulta: nunca emite para probar.
+    assert srv.payload()["operacion"] == "consultar_comprobante"
+    assert srv.requests[0].headers["Authorization"] == f'Token token="{TOKEN}"'
+
+
+@pytest.mark.parametrize("code, texto", [
+    (10, "token"), (11, "ruta"), (50, "suspendida"), (51, "falta de pago"),
+])
+def test_verificar_informa_ruta_o_token_invalidos(code, texto):
+    ok, message = _verify(_Nubefact((400, {"errors": "x", "codigo": code})))
+    assert ok is False and texto in message
+
+
+def test_verificar_ruta_de_otro_servidor_y_sin_conexion():
+    ok, message = _verify(_Nubefact((404, {"detail": "Not found"})))
+    assert ok is False and "404" in message
+    ok, message = _verify(_Nubefact(httpx.ConnectError("sin red")))
+    assert ok is False and "conectar" in message
+
+
+@pytest.mark.parametrize("url, token, texto", [
+    ("http://api.nubefact.com/api/v1/x", TOKEN, "HTTPS"),
+    ("", TOKEN, "vacía"),
+    (URL, "", "token"),
+])
+def test_verificar_valida_antes_de_llamar(url, token, texto):
+    srv = _Nubefact()
+    ok, message = _verify(srv, url=url, token=token)
+    assert ok is False and texto in message
+    assert srv.requests == []
