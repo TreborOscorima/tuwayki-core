@@ -142,7 +142,7 @@ def _run(coro):
 # ── Letra, montos y XML ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("emisor, receptor, letra", [
-    ("RI", "RI", "A"), ("RI", "CF", "B"), ("RI", "monotributo", "B"),
+    ("RI", "RI", "A"), ("RI", "CF", "B"), ("RI", "monotributo", "A"), ("RI", "exento", "B"),
     ("monotributo", "RI", "C"), ("exento", "CF", "C"),
 ])
 def test_letra(emisor, receptor, letra):
@@ -181,6 +181,14 @@ def test_factura_a_con_cuit_del_cliente(cert_y_clave):
     req = arca.build_request(doc, _issuer(cert_y_clave), compute_totals(doc.lines, doc.tax_rate))
     assert (req.cbte_tipo, req.tipo_doc, req.nro_doc, req.condicion_iva_receptor) == (
         1, 80, 30712345671, 1)
+
+
+def test_factura_a_a_monotributista_rg_5003(cert_y_clave):
+    doc = _doc(doc_type=DocumentType.INVOICE, buyer=Buyer("80", "20301234565", "Kiosco Juan",
+                                                          vat_condition="monotributo"))
+    req = arca.build_request(doc, _issuer(cert_y_clave), compute_totals(doc.lines, doc.tax_rate))
+    assert (req.cbte_tipo, req.tipo_doc, req.nro_doc, req.condicion_iva_receptor) == (
+        1, 80, 20301234565, 6)
 
 
 def test_orden_del_xml_segun_el_manual():

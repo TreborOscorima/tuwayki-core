@@ -36,10 +36,12 @@ from tuwayki_core.utils.fiscal_validators import VALID_ENVIRONMENTS, validate_cu
 
 logger = logging.getLogger(__name__)
 
-# Letra según condición frente al IVA de emisor y receptor.
+# Letra según condición frente al IVA de emisor y receptor. Desde la RG 5003
+# (1/7/2021) el Responsable Inscripto le factura A al monotributista: ARCA
+# solo acepta la condición 6 en comprobantes A, M o C (error 10243 en una B).
 _LETTER_MATRIX: dict[tuple[str, str], str] = {
     ("RI", "RI"): "A",
-    ("RI", "monotributo"): "B",
+    ("RI", "monotributo"): "A",
     ("RI", "exento"): "B",
     ("RI", "CF"): "B",
 }
