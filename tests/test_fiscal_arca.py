@@ -280,3 +280,36 @@ def test_login_wsaa_parseo_y_errores():
             '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
             "<soap:Body><soap:Fault><faultstring>cms.cert.untrusted</faultstring></soap:Fault>"
             "</soap:Body></soap:Envelope>")
+
+
+def _wsaa_fault(code: str, message: str) -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        'xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body><soapenv:Fault>'
+        f'<faultcode xmlns:ns1="http://xml.apache.org/axis/">ns1:{code}</faultcode>'
+        f"<faultstring>{message}</faultstring><detail><ns2:exceptionName "
+        'xmlns:ns2="http://xml.apache.org/axis/">gov.afip.desein.dvadac.sua.view.wsaa.'
+        "LoginFault</ns2:exceptionName></detail></soapenv:Fault></soapenv:Body></soapenv:Envelope>"
+    )
+
+
+@pytest.mark.parametrize("code, message", [
+    ("coe.notAuthorized", "Computador no autorizado a acceder al servicio"),
+    ("coe.alreadyAuthenticated", "El CEE ya posee un TA valido para el acceso al WSN solicitado"),
+])
+def test_error_de_wsaa_trae_el_motivo(cert_y_clave, code, message):
+    """El SOAP Fault de WSAA es largo: el motivo quedaba cortado a 100 caracteres."""
+    cert, key = cert_y_clave
+    transport = httpx.MockTransport(lambda request: httpx.Response(500, text=_wsaa_fault(code, message)))
+    with pytest.raises(ValueError) as exc:
+        _run(wsaa.authenticate(cert, key, "sandbox", "ws_sr_constancia_inscripcion", transport=transport))
+    assert str(exc.value) == f"WSAA respondió HTTP 500: {code}: {message}"
+
+
+def test_error_de_wsaa_sin_soap_muestra_el_comienzo(cert_y_clave):
+    cert, key = cert_y_clave
+    transport = httpx.MockTransport(lambda request: httpx.Response(503, text="<html>Service Unavailable</html>"))
+    with pytest.raises(ValueError, match="HTTP 503: <html>Service Unavailable</html>"):
+        _run(wsaa.authenticate(cert, key, "sandbox", transport=transport))

@@ -146,6 +146,26 @@ def _local(tag: str) -> str:
     return tag.split("}")[-1] if "}" in tag else tag
 
 
+def soap_fault_text(response_xml: str) -> str:
+    """``"<faultcode>: <faultstring>"`` de un SOAP Fault ("" si no lo es).
+
+    El código va sin prefijo de namespace (``ns1:coe.notAuthorized`` →
+    ``coe.notAuthorized``), que es lo que identifica el error de WSAA.
+    """
+    try:
+        root = ET.fromstring(response_xml)
+    except ET.ParseError:
+        return ""
+    code = string = ""
+    for elem in root.iter():
+        name = _local(elem.tag)
+        if name == "faultcode" and not code:
+            code = (elem.text or "").strip().split(":", 1)[-1]
+        elif name == "faultstring" and not string:
+            string = (elem.text or "").strip()
+    return ": ".join(p for p in (code, string) if p)
+
+
 def parse_login_response(response_xml: str) -> WSAACredentials:
     try:
         root = ET.fromstring(response_xml)
@@ -232,9 +252,9 @@ async def authenticate(
             logger.debug("WSAA HTTP %s body=%r", response.status_code, response.text)
             # Un 500 con "El CEE ya posee un TA valido" = ya hay un token vigente
             # emitido en otro proceso: hay que esperar a que venza o reusarlo.
-            raise ValueError(
-                f"WSAA respondió HTTP {response.status_code}: {response.text[:100].strip()}"
-            )
+            # "coe.notAuthorized" = el certificado no está autorizado para el servicio.
+            detail = soap_fault_text(response.text) or response.text[:100].strip()
+            raise ValueError(f"WSAA respondió HTTP {response.status_code}: {detail}")
         credentials = parse_login_response(response.text)
         credentials.service = service
         _credentials_cache[key] = credentials
