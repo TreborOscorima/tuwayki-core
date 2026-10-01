@@ -8,6 +8,8 @@ la tasa que se usa como fallback en documentos fiscales y recibos.
 from decimal import Decimal
 from typing import TypedDict
 
+from tuwayki_core.utils.formatting import COUNTRY_NUMBER_FORMAT
+
 
 class TaxRatePreset(TypedDict):
     tax_name: str
@@ -75,11 +77,13 @@ COUNTRY_TAX_PRESETS: dict[str, list[TaxRatePreset]] = {
             "display_order": 1,
         },
     ],
+    # Ecuador: 15% desde abril de 2024 (Ley Orgánica para Enfrentar el Conflicto
+    # Armado Interno; antes 12%). 5% para materiales de construcción.
     "EC": [
         {
             "tax_name": "IVA",
             "label": "Estándar",
-            "rate": Decimal("12.00"),
+            "rate": Decimal("15.00"),
             "is_default": True,
             "display_order": 1,
         },
@@ -172,3 +176,18 @@ _DEFAULT_PRESET: list[TaxRatePreset] = [
 
 def get_presets_for_country(country_code: str) -> list[TaxRatePreset]:
     return COUNTRY_TAX_PRESETS.get(country_code.upper(), _DEFAULT_PRESET)
+
+
+def preset_summary(country_code: str) -> str:
+    """Resumen de las tasas del país para mostrar al elegirlo: "IVA 21%/10,5%/27%".
+
+    Sale de las mismas tasas que se cargan, así el texto no queda desactualizado
+    cuando cambia una tasa. Los decimales usan el separador del país.
+    """
+    code = country_code.upper()
+    presets = sorted(get_presets_for_country(code), key=lambda p: p["display_order"])
+    decimal_sep = COUNTRY_NUMBER_FORMAT.get(code, {}).get("decimal_sep", ".")
+    rates = "/".join(
+        f"{p['rate'].normalize():f}".replace(".", decimal_sep) + "%" for p in presets
+    )
+    return f"{presets[0]['tax_name']} {rates}"
