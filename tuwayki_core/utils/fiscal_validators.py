@@ -119,7 +119,7 @@ def validate_nubefact_url(url: str) -> tuple[bool, str]:
         return (
             True,
             "Advertencia: la URL no contiene 'nubefact' en el dominio. "
-            "Verifique que sea un endpoint de API válido.",
+            "Verifica que sea un endpoint de API válido.",
         )
 
     return True, ""
