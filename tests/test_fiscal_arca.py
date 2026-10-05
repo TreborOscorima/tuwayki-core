@@ -22,7 +22,7 @@ from tuwayki_core.fiscal import argentina as arca
 from tuwayki_core.fiscal import argentina_wsaa as wsaa
 from tuwayki_core.fiscal import argentina_wsfe as wsfe
 from tuwayki_core.fiscal.amounts import compute_totals
-from tuwayki_core.fiscal.models import Buyer, Document, DocumentType, FiscalStatus, Line
+from tuwayki_core.fiscal.models import Buyer, Document, DocumentType, FiscalStatus, Line, Reference
 
 D = Decimal
 CUIT = "20409378472"   # CUIT de prueba con dígito verificador válido
@@ -313,3 +313,98 @@ def test_error_de_wsaa_sin_soap_muestra_el_comienzo(cert_y_clave):
     transport = httpx.MockTransport(lambda request: httpx.Response(503, text="<html>Service Unavailable</html>"))
     with pytest.raises(ValueError, match="HTTP 503: <html>Service Unavailable</html>"):
         _run(wsaa.authenticate(cert, key, "sandbox", transport=transport))
+
+
+# ── Notas de crédito y débito ───────────────────────────────────────────
+
+def _nota(doc_type=DocumentType.CREDIT_NOTE, letra="B", **kw) -> Document:
+    ref = Reference(DocumentType.RECEIPT, "B 00003", 42, reason_code=1, reason="DEVOLUCIÓN",
+                    letter=letra, point_of_sale=3, issue_date=dt.date(2026, 9, 26))
+    base = dict(doc_type=doc_type, number=7, issue_date=dt.date(2026, 10, 4), reference=ref,
+                lines=[Line("Agua", D("1"), D("1815.00"))])
+    base.update(kw)
+    return _doc(**base)
+
+
+@pytest.mark.parametrize("doc_type, letra, cbte", [
+    (DocumentType.CREDIT_NOTE, "A", 3), (DocumentType.CREDIT_NOTE, "B", 8),
+    (DocumentType.CREDIT_NOTE, "C", 13), (DocumentType.DEBIT_NOTE, "A", 2),
+    (DocumentType.DEBIT_NOTE, "B", 7), (DocumentType.DEBIT_NOTE, "C", 12),
+])
+def test_tipo_de_la_nota_segun_la_letra(doc_type, letra, cbte):
+    assert arca.cbte_tipo(doc_type, letra) == cbte
+
+
+def test_nota_de_credito_b_informa_la_factura_que_modifica(cert_y_clave):
+    doc = _nota()
+    req = arca.build_request(doc, _issuer(cert_y_clave), compute_totals(doc.lines, doc.tax_rate))
+    assert req.cbte_tipo == 8
+    assert req.cbtes_asoc == [{"Tipo": 6, "PtoVta": 3, "Nro": 42, "Cuit": CUIT,
+                               "CbteFch": "20260926"}]
+    assert req.fecha_cbte == "20261004"            # la nota lleva SU fecha
+    assert req.imp_neto + req.imp_iva == req.imp_total == D("1815.00")
+
+
+def test_la_nota_lleva_la_letra_del_original_aunque_cambie_la_condicion(cert_y_clave):
+    """Emisor que era monotributista (Factura C) y pasó a RI: la nota sigue siendo C."""
+    doc = _nota(letra="C", reference=Reference(DocumentType.INVOICE, "C 00001", 9, 1,
+                                                letter="C", point_of_sale=1))
+    req = arca.build_request(doc, _issuer(cert_y_clave, "RI"), compute_totals(doc.lines, doc.tax_rate))
+    assert req.cbte_tipo == 13
+    assert (req.imp_neto, req.imp_iva, req.iva_items) == (D("1815.00"), D("0"), [])
+    assert req.cbtes_asoc[0]["Tipo"] == 11 and req.cbtes_asoc[0]["PtoVta"] == 1
+    assert "CbteFch" not in req.cbtes_asoc[0]       # sin fecha del original no se informa
+
+
+def test_nota_a_discrimina_iva_y_va_al_mismo_cuit(cert_y_clave):
+    buyer = Buyer("80", "30712345671", "Cliente SA", vat_condition="RI")
+    doc = _nota(letra="A", buyer=buyer)
+    req = arca.build_request(doc, _issuer(cert_y_clave), compute_totals(doc.lines, doc.tax_rate))
+    assert (req.cbte_tipo, req.tipo_doc, req.nro_doc, req.condicion_iva_receptor) == (
+        3, 80, 30712345671, 1)
+    assert req.iva_items and req.cbtes_asoc[0]["Tipo"] == 1
+
+
+def test_orden_del_xml_con_comprobante_asociado(cert_y_clave):
+    doc = _nota()
+    req = arca.build_request(doc, _issuer(cert_y_clave), compute_totals(doc.lines, doc.tax_rate))
+    xml = wsfe.build_fecae_request_xml("T", "S", int(CUIT), req)
+    detalle = xml[xml.index("<wsfe:FECAEDetRequest>"):]
+    orden = ["MonCotiz", "CondicionIVAReceptorId", "<wsfe:CbtesAsoc>", "<wsfe:Iva>"]
+    posiciones = [detalle.index(tag) for tag in orden]
+    assert posiciones == sorted(posiciones)
+    asociado = detalle[detalle.index("<wsfe:CbteAsoc>"):detalle.index("</wsfe:CbteAsoc>")]
+    campos = ["<wsfe:Tipo>6<", "<wsfe:PtoVta>3<", "<wsfe:Nro>42<", f"<wsfe:Cuit>{CUIT}<",
+              "<wsfe:CbteFch>20260926<"]
+    posiciones = [asociado.index(tag) for tag in campos]
+    assert posiciones == sorted(posiciones)
+
+
+def test_factura_no_lleva_comprobante_asociado(cert_y_clave):
+    doc = _doc()
+    req = arca.build_request(doc, _issuer(cert_y_clave), compute_totals(doc.lines, doc.tax_rate))
+    assert req.cbtes_asoc == []
+    assert "CbtesAsoc" not in wsfe.build_fecae_request_xml("T", "S", int(CUIT), req)
+
+
+def test_emite_la_nota_de_credito_con_cae_y_qr(cert_y_clave):
+    srv = _Arca({"FECAESolicitar": [_cae_xml(nro=7)]})
+    r = _run(arca.issue(_nota(), _issuer(cert_y_clave), transport=srv.transport))
+    assert r.status == FiscalStatus.AUTHORIZED
+    body = srv.bodies["FECAESolicitar"]
+    assert "<wsfe:CbteTipo>8</wsfe:CbteTipo>" in body and "<wsfe:Nro>42</wsfe:Nro>" in body
+    qr = json.loads(base64.b64decode(parse_qs(urlparse(r.qr_data).query)["p"][0]))
+    assert (qr["tipoCmp"], qr["nroCmp"]) == (8, 7)
+    assert r.request["cbtes_asoc"][0]["Nro"] == 42
+
+
+@pytest.mark.parametrize("ref, texto", [
+    (None, "comprobante que modifica"),
+    (Reference(DocumentType.CREDIT_NOTE, "B 00003", 5, 1, letter="B"), "no otra nota"),
+    (Reference(DocumentType.RECEIPT, "X", 5, 1, letter="X"), "Letra"),
+])
+def test_nota_sin_comprobante_valido_se_rechaza_sin_llamar(cert_y_clave, ref, texto):
+    srv = _Arca({})
+    r = _run(arca.issue(_nota(reference=ref), _issuer(cert_y_clave), transport=srv.transport))
+    assert r.status == FiscalStatus.REJECTED and texto in r.message
+    assert srv.logins == 0

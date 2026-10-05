@@ -90,6 +90,9 @@ class FECAERequest:
     iva_items: list[dict] = field(default_factory=list)   # [{"Id": 5, "BaseImp": X, "Importe": Y}]
     # Condición frente al IVA del receptor (RG 5616, obligatoria desde 2025).
     condicion_iva_receptor: int | None = None
+    # Notas de crédito/débito: comprobante que modifican (CbtesAsoc).
+    # [{"Tipo": 6, "PtoVta": 3, "Nro": 42, "Cuit": "20...", "CbteFch": "AAAAMMDD"}]
+    cbtes_asoc: list[dict] = field(default_factory=list)
 
 
 def _xe(value: object) -> str:
@@ -264,6 +267,19 @@ def build_fecae_request_xml(token: str, sign: str, cuit: int, req: FECAERequest)
         f"<wsfe:CondicionIVAReceptorId>{int(req.condicion_iva_receptor)}</wsfe:CondicionIVAReceptorId>"
         if req.condicion_iva_receptor else ""
     )
+    asociados = ""
+    if req.cbtes_asoc:
+        # Orden del XSD de CbteAsoc: Tipo, PtoVta, Nro, Cuit, CbteFch.
+        asociados = "<wsfe:CbtesAsoc>" + "".join(
+            "<wsfe:CbteAsoc>"
+            f"<wsfe:Tipo>{int(it['Tipo'])}</wsfe:Tipo>"
+            f"<wsfe:PtoVta>{int(it['PtoVta'])}</wsfe:PtoVta>"
+            f"<wsfe:Nro>{int(it['Nro'])}</wsfe:Nro>"
+            + (f"<wsfe:Cuit>{_xe(it['Cuit'])}</wsfe:Cuit>" if it.get("Cuit") else "")
+            + (f"<wsfe:CbteFch>{_xe(it['CbteFch'])}</wsfe:CbteFch>" if it.get("CbteFch") else "")
+            + "</wsfe:CbteAsoc>"
+            for it in req.cbtes_asoc
+        ) + "</wsfe:CbtesAsoc>"
     body = (
         f"{_auth_xml(token, sign, cuit)}"
         "<wsfe:FeCAEReq>"
@@ -289,6 +305,7 @@ def build_fecae_request_xml(token: str, sign: str, cuit: int, req: FECAERequest)
         f"<wsfe:MonId>{_xe(req.mon_id)}</wsfe:MonId>"
         f"<wsfe:MonCotiz>{mon_cotiz}</wsfe:MonCotiz>"
         f"{condicion}"
+        f"{asociados}"
         f"{iva_xml}"
         "</wsfe:FECAEDetRequest></wsfe:FeDetReq>"
         "</wsfe:FeCAEReq>"

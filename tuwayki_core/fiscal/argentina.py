@@ -1,8 +1,9 @@
 """Argentina: emitir un ``Document`` ante ARCA (ex AFIP) con WSAA + WSFEv1.
 
 Cada empresa emite con SU certificado y clave (el sistema los descifra y los
-pasa en claro). Soporta factura A/B/C (la "boleta" se emite como B o C);
-las notas de crédito/débito de Argentina quedan para más adelante.
+pasa en claro). Soporta factura A/B/C (la "boleta" se emite como B o C) y sus
+notas de crédito y débito: la nota lleva la letra del comprobante que modifica
+y lo informa en ``CbtesAsoc`` (obligatorio en las notas, RG 4540).
 
 Diferencias con la versión de TUWAYKISHOP (corregidas acá, según el manual
 del desarrollador WSFEv1 de ARCA):
@@ -47,6 +48,15 @@ _LETTER_MATRIX: dict[tuple[str, str], str] = {
 }
 # CbteTipo de ARCA por letra (factura; la "boleta" usa el mismo código).
 CBTE_TIPO_FACTURA = {"A": 1, "B": 6, "C": 11}
+CBTE_TIPO_NOTA_DEBITO = {"A": 2, "B": 7, "C": 12}
+CBTE_TIPO_NOTA_CREDITO = {"A": 3, "B": 8, "C": 13}
+_CBTE_TIPOS: dict[DocumentType, dict[str, int]] = {
+    DocumentType.INVOICE: CBTE_TIPO_FACTURA,
+    DocumentType.RECEIPT: CBTE_TIPO_FACTURA,
+    DocumentType.CREDIT_NOTE: CBTE_TIPO_NOTA_CREDITO,
+    DocumentType.DEBIT_NOTE: CBTE_TIPO_NOTA_DEBITO,
+}
+NOTE_TYPES = (DocumentType.CREDIT_NOTE, DocumentType.DEBIT_NOTE)
 # Condición frente al IVA del receptor (tabla de ARCA, RG 5616).
 CONDICION_IVA_RECEPTOR = {"RI": 1, "exento": 4, "CF": 5, "monotributo": 6}
 # Id de alícuota de IVA de ARCA.
@@ -76,6 +86,42 @@ def invoice_letter(issuer_vat: str, buyer_vat: str) -> str:
     return _LETTER_MATRIX.get((issuer_vat, (buyer_vat or "CF").strip()), "B")
 
 
+def cbte_tipo(doc_type: DocumentType, letter: str) -> int:
+    """CbteTipo de ARCA: Factura A = 1, Nota de crédito B = 8, etc."""
+    return _CBTE_TIPOS.get(doc_type, CBTE_TIPO_FACTURA)[letter]
+
+
+def document_letter(doc: Document, issuer: ArcaIssuer) -> str:
+    """Letra del comprobante.
+
+    Una nota lleva la letra del comprobante que modifica (aunque después haya
+    cambiado la condición IVA del emisor); una factura, la de la matriz.
+    """
+    ref = doc.reference
+    if doc.doc_type in NOTE_TYPES and ref is not None:
+        letter = (ref.letter or "").strip().upper()
+        if letter in CBTE_TIPO_FACTURA:
+            return letter
+    buyer_vat = doc.buyer.vat_condition if doc.buyer else "CF"
+    return invoice_letter(issuer.vat_condition, buyer_vat)
+
+
+def associated_documents(doc: Document, issuer: ArcaIssuer, letter: str) -> list[dict]:
+    """``CbtesAsoc`` de una nota: el comprobante original, del mismo emisor."""
+    ref = doc.reference
+    if doc.doc_type not in NOTE_TYPES or ref is None:
+        return []
+    item: dict = {
+        "Tipo": cbte_tipo(ref.doc_type, letter),
+        "PtoVta": int(ref.point_of_sale or issuer.point_of_sale),
+        "Nro": int(ref.number),
+        "Cuit": issuer.cuit,
+    }
+    if ref.issue_date is not None:
+        item["CbteFch"] = ref.issue_date.strftime("%Y%m%d")
+    return [item]
+
+
 def iva_items(totals: Totals, tax_rate: Decimal) -> list[dict]:
     rate = Decimal(str(tax_rate)).normalize()
     alic = ALICUOTA_IVA_ID.get(rate)
@@ -87,10 +133,10 @@ def iva_items(totals: Totals, tax_rate: Decimal) -> list[dict]:
 def build_request(doc: Document, issuer: ArcaIssuer, totals: Totals) -> wsfe.FECAERequest:
     buyer = doc.buyer
     buyer_vat = buyer.vat_condition if buyer else "CF"
-    letter = invoice_letter(issuer.vat_condition, buyer_vat)
+    letter = document_letter(doc, issuer)
     fecha = doc.issue_date.strftime("%Y%m%d")
     req = wsfe.FECAERequest(
-        cbte_tipo=CBTE_TIPO_FACTURA[letter],
+        cbte_tipo=cbte_tipo(doc.doc_type, letter),
         punto_vta=int(issuer.point_of_sale),
         concepto=issuer.concept if issuer.concept in (1, 2, 3) else 1,
         tipo_doc=int(buyer.doc_type) if buyer and buyer.doc_type.isdigit() else 99,
@@ -102,6 +148,7 @@ def build_request(doc: Document, issuer: ArcaIssuer, totals: Totals) -> wsfe.FEC
         mon_id=MONEDA_ARCA.get(doc.currency, "PES"),
         mon_cotiz=doc.exchange_rate or Decimal("1"),
         condicion_iva_receptor=CONDICION_IVA_RECEPTOR.get(buyer_vat or "CF", 5),
+        cbtes_asoc=associated_documents(doc, issuer, letter),
     )
     if req.concepto in (2, 3):
         req.fecha_serv_desde = req.fecha_serv_hasta = req.fecha_vto_pago = fecha
@@ -142,6 +189,21 @@ def arca_qr(issuer: ArcaIssuer, doc: Document, req: wsfe.FECAERequest, cae: str)
     return "https://www.afip.gob.ar/fe/qr/?p=" + base64.b64encode(raw).decode()
 
 
+def validate_note(doc: Document) -> list[str]:
+    """Una nota tiene que indicar la factura que modifica (CbtesAsoc)."""
+    if doc.doc_type not in NOTE_TYPES:
+        return []
+    ref = doc.reference
+    if ref is None or int(ref.number or 0) <= 0:
+        return ["La nota debe indicar el comprobante que modifica."]
+    if ref.doc_type in NOTE_TYPES:
+        return ["La nota tiene que modificar una factura, no otra nota."]
+    letter = (ref.letter or "").strip().upper()
+    if letter and letter not in CBTE_TIPO_FACTURA:
+        return [f"Letra del comprobante original no válida: {ref.letter}."]
+    return []
+
+
 def validate_issuer(issuer: ArcaIssuer) -> list[str]:
     errors = []
     ok, msg = validate_cuit(issuer.cuit)
@@ -172,14 +234,10 @@ async def issue(
     doc: Document, issuer: ArcaIssuer, *, transport: httpx.AsyncBaseTransport | None = None
 ) -> IssueResult:
     """Emite el comprobante y devuelve el CAE (o el motivo del rechazo)."""
-    if doc.doc_type not in (DocumentType.INVOICE, DocumentType.RECEIPT):
-        return IssueResult(
-            status=FiscalStatus.REJECTED, error_code="validacion",
-            message="Las notas de crédito/débito de Argentina todavía no están disponibles.",
-        )
     errors = validate_issuer(issuer)
     if doc.country != "AR":
         errors.append("Este conector es para comprobantes de Argentina.")
+    errors.extend(validate_note(doc))
     try:
         totals = compute_totals(doc.lines, doc.tax_rate, doc.global_discount)
         req = build_request(doc, issuer, totals)
@@ -194,6 +252,8 @@ async def issue(
         "tipo_doc": req.tipo_doc, "nro_doc": req.nro_doc, "fecha": req.fecha_cbte,
         "condicion_iva_receptor": req.condicion_iva_receptor, "ambiente": issuer.environment,
     }
+    if req.cbtes_asoc:
+        request_log["cbtes_asoc"] = req.cbtes_asoc
     try:
         creds = await wsaa.authenticate(
             issuer.certificate_pem, issuer.private_key_pem, issuer.environment, transport=transport

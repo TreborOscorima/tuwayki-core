@@ -72,6 +72,12 @@ class Reference:
     number: int
     reason_code: int                     # Perú: tipo_de_nota_de_credito/debito
     reason: str = ""
+    # Argentina (CbtesAsoc de ARCA): letra, punto de venta y fecha del
+    # comprobante original. La nota lleva la letra del original; sin punto de
+    # venta se usa el del emisor. Perú no los usa.
+    letter: str = ""
+    point_of_sale: int | None = None
+    issue_date: date | None = None
 
 
 @dataclass
