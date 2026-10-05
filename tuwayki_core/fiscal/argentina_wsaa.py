@@ -7,6 +7,12 @@ empresa y los pasa en claro (en memoria, nunca a disco).
 Flujo: TRA (XML) → firma CMS/PKCS#7 con el certificado de la empresa →
 LoginCms → Token + Sign (válidos ~12 h, se cachean por certificado).
 
+WSAA da UN solo ticket vigente por certificado y servicio: si se pide otro
+mientras el anterior no venció responde ``coe.alreadyAuthenticated``. La cache
+en memoria se pierde al reiniciar y no se comparte entre procesos, así que el
+sistema que llama puede registrar un almacén (``set_credential_store``, por
+ejemplo en su base de datos) para que todos reusen el mismo ticket.
+
 Endpoints:
     - Homologación: https://wsaahomo.afip.gov.ar/ws/services/LoginCms
     - Producción:   https://wsaa.afip.gov.ar/ws/services/LoginCms
@@ -20,6 +26,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Protocol
 
 import httpx
 from cryptography import x509
@@ -35,8 +42,15 @@ WSAA_URLS = {
     "production": "https://wsaa.afip.gov.ar/ws/services/LoginCms",
 }
 _TOKEN_RENEW_MARGIN_SECONDS = 600     # renovar 10 min antes de vencer
+_TOKEN_USABLE_MARGIN_SECONDS = 60     # un ticket por renovar sirve hasta 1 min antes
 _WSAA_TIMEOUT_SECONDS = 30
 _TRA_DURATION_HOURS = 12
+# Ante "ya hay un ticket vigente", otro proceso puede estar guardándolo recién:
+# se vuelve a leer el almacén tras estas esperas (segundos).
+_ALREADY_AUTHENTICATED_WAITS = (0.5, 1.5, 3.0)
+
+# Código de error de ``issue`` cuando WSAA no da ticket porque ya hay uno vigente.
+ALREADY_AUTHENTICATED_CODE = "wsaa_ticket_vigente"
 
 
 @dataclass
@@ -50,11 +64,42 @@ class WSAACredentials:
     def is_valid(self) -> bool:
         return time.time() < (self.expiration - _TOKEN_RENEW_MARGIN_SECONDS)
 
+    @property
+    def is_usable(self) -> bool:
+        """Todavía no venció (aunque ya convenga renovarlo)."""
+        return time.time() < (self.expiration - _TOKEN_USABLE_MARGIN_SECONDS)
+
+
+class WSAAAlreadyAuthenticatedError(ValueError):
+    """WSAA no da un ticket nuevo: ya hay uno vigente que este proceso no tiene."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            "ARCA ya entregó un permiso vigente a este certificado y el sistema no lo "
+            "tiene guardado. Vence en 12 horas como máximo."
+        )
+        self.detail = detail
+
+
+class CredentialStore(Protocol):
+    """Almacén compartido de tickets (por ejemplo, una tabla de la base)."""
+
+    async def load(self, key: str) -> WSAACredentials | None: ...
+
+    async def save(self, key: str, credentials: WSAACredentials) -> None: ...
+
 
 # ── Cache en memoria (por certificado + ambiente + servicio) ──────────────
 _credentials_cache: dict[str, WSAACredentials] = {}
 _cache_locks: dict[str, asyncio.Lock] = {}
 _cache_locks_mutex = asyncio.Lock()
+_store: CredentialStore | None = None
+
+
+def set_credential_store(store: CredentialStore | None) -> None:
+    """Registra el almacén compartido (``None`` = solo memoria)."""
+    global _store
+    _store = store
 
 
 def _as_bytes(value: bytes | str) -> bytes:
@@ -86,6 +131,52 @@ async def _lock_for(key: str) -> asyncio.Lock:
         if key not in _cache_locks:
             _cache_locks[key] = asyncio.Lock()
         return _cache_locks[key]
+
+
+# Si el almacén falla se sigue solo con memoria: no debe frenar la facturación.
+async def _load_stored(key: str) -> WSAACredentials | None:
+    if _store is None:
+        return None
+    try:
+        return await _store.load(key)
+    except Exception as exc:
+        logger.warning("WSAA: no se pudo leer el ticket guardado (%s): %s", key, exc)
+        return None
+
+
+async def _save_stored(key: str, credentials: WSAACredentials) -> None:
+    if _store is None:
+        return
+    try:
+        await _store.save(key, credentials)
+    except Exception as exc:
+        logger.warning("WSAA: no se pudo guardar el ticket (%s): %s", key, exc)
+
+
+def _is_already_authenticated(detail: str) -> bool:
+    text = detail.lower()
+    return "alreadyauthenticated" in text or "ya posee un ta valido" in text
+
+
+async def _reuse_after_already_authenticated(
+    key: str, known: list[WSAACredentials | None]
+) -> WSAACredentials | None:
+    """El ticket vigente que WSAA no quiere repetir, si alguien lo tiene.
+
+    Primero el almacén (otro proceso pudo guardarlo hace un instante) y si no,
+    el que ya teníamos y estaba por renovarse pero todavía no venció.
+    """
+    waits = (0.0, *_ALREADY_AUTHENTICATED_WAITS) if _store is not None else ()
+    for delay in waits:
+        if delay:
+            await asyncio.sleep(delay)
+        stored = await _load_stored(key)
+        if stored and stored.is_usable:
+            if stored.is_valid:
+                _credentials_cache[key] = stored
+            return stored
+        known.append(stored)
+    return next((c for c in known if c and c.is_usable), None)
 
 
 # ── TRA y firma ──────────────────────────────────────────────────────────
@@ -219,7 +310,11 @@ async def authenticate(
 ) -> WSAACredentials:
     """Token + Sign para ``service``. Usa la cache si el token sigue vigente.
 
+    Orden: memoria del proceso → almacén compartido → login en WSAA (y se
+    guarda en los dos).
+
     Raises:
+        WSAAAlreadyAuthenticatedError: WSAA ya dio un ticket vigente que nadie tiene.
         ValueError: certificado/clave inválidos, ambiente inválido o rechazo de WSAA.
         ConnectionError: no se pudo contactar a WSAA.
     """
@@ -232,30 +327,58 @@ async def authenticate(
     if cached:
         return cached
     async with await _lock_for(key):
-        cached = get_cached_credentials(key)   # otro pedido pudo renovarlo
+        previous = _credentials_cache.get(key)   # puede estar por renovarse
+        cached = get_cached_credentials(key)     # otro pedido pudo renovarlo
         if cached:
             return cached
-        cms = sign_tra(build_tra_xml(service), certificate_pem, private_key_pem)
-        url = WSAA_URLS[environment]
+        stored = await _load_stored(key)
+        if stored and stored.is_valid:
+            _credentials_cache[key] = stored
+            return stored
         try:
-            async with httpx.AsyncClient(timeout=_WSAA_TIMEOUT_SECONDS, transport=transport) as client:
-                response = await client.post(
-                    url,
-                    content=_build_login_cms_soap(cms).encode("utf-8"),
-                    headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '""'},
-                )
-        except httpx.TimeoutException as exc:
-            raise ConnectionError(f"WSAA no respondió a tiempo ({url}).") from exc
-        except httpx.HTTPError as exc:
-            raise ConnectionError(f"No se pudo conectar a WSAA ({url}): {exc}") from exc
-        if response.status_code != 200:
-            logger.debug("WSAA HTTP %s body=%r", response.status_code, response.text)
-            # Un 500 con "El CEE ya posee un TA valido" = ya hay un token vigente
-            # emitido en otro proceso: hay que esperar a que venza o reusarlo.
-            # "coe.notAuthorized" = el certificado no está autorizado para el servicio.
-            detail = soap_fault_text(response.text) or response.text[:100].strip()
-            raise ValueError(f"WSAA respondió HTTP {response.status_code}: {detail}")
-        credentials = parse_login_response(response.text)
-        credentials.service = service
+            credentials = await _login(
+                certificate_pem, private_key_pem, environment, service, transport
+            )
+        except WSAAAlreadyAuthenticatedError as exc:
+            reused = await _reuse_after_already_authenticated(key, [previous, stored])
+            if reused:
+                return reused
+            logger.warning("WSAA: ticket vigente sin guardar (%s): %s", key, exc.detail)
+            raise
         _credentials_cache[key] = credentials
+        await _save_stored(key, credentials)
         return credentials
+
+
+async def _login(
+    certificate_pem: bytes | str,
+    private_key_pem: bytes | str,
+    environment: str,
+    service: str,
+    transport: httpx.AsyncBaseTransport | None,
+) -> WSAACredentials:
+    """LoginCms en WSAA: un ticket nuevo (sin cache)."""
+    cms = sign_tra(build_tra_xml(service), certificate_pem, private_key_pem)
+    url = WSAA_URLS[environment]
+    try:
+        async with httpx.AsyncClient(timeout=_WSAA_TIMEOUT_SECONDS, transport=transport) as client:
+            response = await client.post(
+                url,
+                content=_build_login_cms_soap(cms).encode("utf-8"),
+                headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '""'},
+            )
+    except httpx.TimeoutException as exc:
+        raise ConnectionError(f"WSAA no respondió a tiempo ({url}).") from exc
+    except httpx.HTTPError as exc:
+        raise ConnectionError(f"No se pudo conectar a WSAA ({url}): {exc}") from exc
+    if response.status_code != 200:
+        logger.debug("WSAA HTTP %s body=%r", response.status_code, response.text)
+        # "coe.alreadyAuthenticated" = ya hay un ticket vigente para el certificado.
+        # "coe.notAuthorized" = el certificado no está autorizado para el servicio.
+        detail = soap_fault_text(response.text) or response.text[:100].strip()
+        if _is_already_authenticated(detail):
+            raise WSAAAlreadyAuthenticatedError(detail)
+        raise ValueError(f"WSAA respondió HTTP {response.status_code}: {detail}")
+    credentials = parse_login_response(response.text)
+    credentials.service = service
+    return credentials

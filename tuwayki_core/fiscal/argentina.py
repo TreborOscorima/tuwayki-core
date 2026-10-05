@@ -261,6 +261,9 @@ async def issue(
     except ConnectionError as exc:
         return IssueResult(status=FiscalStatus.ERROR, error_code="wsaa_conexion",
                            message=str(exc), request=request_log)
+    except wsaa.WSAAAlreadyAuthenticatedError as exc:
+        return IssueResult(status=FiscalStatus.ERROR, error_code=wsaa.ALREADY_AUTHENTICATED_CODE,
+                           message=str(exc), request=request_log)
     except ValueError as exc:
         return IssueResult(status=FiscalStatus.ERROR, error_code="wsaa",
                            message=f"No se pudo autenticar con ARCA: {exc}", request=request_log)

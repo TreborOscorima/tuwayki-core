@@ -50,8 +50,10 @@ def cert_y_clave():
 @pytest.fixture(autouse=True)
 def _cache_limpia():
     wsaa.clear_cache()
+    wsaa.set_credential_store(None)
     yield
     wsaa.clear_cache()
+    wsaa.set_credential_store(None)
 
 
 def _issuer(cert_y_clave, vat="RI") -> arca.ArcaIssuer:
@@ -295,13 +297,10 @@ def _wsaa_fault(code: str, message: str) -> str:
     )
 
 
-@pytest.mark.parametrize("code, message", [
-    ("coe.notAuthorized", "Computador no autorizado a acceder al servicio"),
-    ("coe.alreadyAuthenticated", "El CEE ya posee un TA valido para el acceso al WSN solicitado"),
-])
-def test_error_de_wsaa_trae_el_motivo(cert_y_clave, code, message):
+def test_error_de_wsaa_trae_el_motivo(cert_y_clave):
     """El SOAP Fault de WSAA es largo: el motivo quedaba cortado a 100 caracteres."""
     cert, key = cert_y_clave
+    code, message = "coe.notAuthorized", "Computador no autorizado a acceder al servicio"
     transport = httpx.MockTransport(lambda request: httpx.Response(500, text=_wsaa_fault(code, message)))
     with pytest.raises(ValueError) as exc:
         _run(wsaa.authenticate(cert, key, "sandbox", "ws_sr_constancia_inscripcion", transport=transport))
@@ -313,6 +312,154 @@ def test_error_de_wsaa_sin_soap_muestra_el_comienzo(cert_y_clave):
     transport = httpx.MockTransport(lambda request: httpx.Response(503, text="<html>Service Unavailable</html>"))
     with pytest.raises(ValueError, match="HTTP 503: <html>Service Unavailable</html>"):
         _run(wsaa.authenticate(cert, key, "sandbox", transport=transport))
+
+
+# ── Ticket de WSAA compartido (almacén) ─────────────────────────────────
+
+_YA_AUTENTICADO = _wsaa_fault(
+    "coe.alreadyAuthenticated", "El CEE ya posee un TA valido para el acceso al WSN solicitado"
+)
+
+
+class _Almacen:
+    """Almacén en memoria, como la tabla que comparten los procesos del sistema."""
+
+    def __init__(self, falla: bool = False):
+        self.tickets: dict[str, wsaa.WSAACredentials] = {}
+        self.falla = falla
+        self.lecturas = 0
+
+    async def load(self, key):
+        self.lecturas += 1
+        if self.falla:
+            raise RuntimeError("base caída")
+        return self.tickets.get(key)
+
+    async def save(self, key, credentials):
+        if self.falla:
+            raise RuntimeError("base caída")
+        self.tickets[key] = credentials
+
+
+class _Wsaa:
+    """WSAA que da un ticket o contesta que ya hay uno vigente."""
+
+    def __init__(self, *respuestas: str):
+        self.respuestas = list(respuestas) or ["ok"]
+        self.logins = 0
+
+    def __call__(self, _request: httpx.Request) -> httpx.Response:
+        self.logins += 1
+        if self.respuestas.pop(0) == "ya":
+            return httpx.Response(500, text=_YA_AUTENTICADO)
+        return httpx.Response(200, text=_login_xml(token=f"TOKEN{self.logins}"))
+
+    @property
+    def transport(self):
+        return httpx.MockTransport(self)
+
+
+def _key(cert_y_clave, service="wsfe"):
+    return wsaa.cache_key_for(cert_y_clave[0], "sandbox", service)
+
+
+def _ticket(token="GUARDADO", vence_en=6 * 3600):
+    return wsaa.WSAACredentials(token=token, sign="FIRMA", expiration=dt.datetime.now().timestamp() + vence_en)
+
+
+@pytest.fixture
+def sin_esperas(monkeypatch):
+    monkeypatch.setattr(wsaa, "_ALREADY_AUTHENTICATED_WAITS", (0, 0))
+
+
+def test_ticket_vigente_sin_guardar_da_un_error_claro(cert_y_clave):
+    cert, key = cert_y_clave
+    srv = _Wsaa("ya")
+    with pytest.raises(wsaa.WSAAAlreadyAuthenticatedError) as exc:
+        _run(wsaa.authenticate(cert, key, "sandbox", transport=srv.transport))
+    assert "ya entregó un permiso vigente" in str(exc.value)
+    assert "coe.alreadyAuthenticated" in exc.value.detail
+    assert isinstance(exc.value, ValueError)      # quien atrapa ValueError lo sigue viendo
+
+
+def test_el_ticket_se_guarda_y_sobrevive_a_un_reinicio(cert_y_clave):
+    cert, key = cert_y_clave
+    almacen, srv = _Almacen(), _Wsaa()
+    wsaa.set_credential_store(almacen)
+    primero = _run(wsaa.authenticate(cert, key, "sandbox", transport=srv.transport))
+    assert almacen.tickets[_key(cert_y_clave)].token == primero.token == "TOKEN1"
+
+    wsaa.clear_cache()                            # reinicio: se pierde la memoria
+    despues = _run(wsaa.authenticate(cert, key, "sandbox", transport=srv.transport))
+    assert despues.token == "TOKEN1" and srv.logins == 1
+
+
+@pytest.mark.usefixtures("sin_esperas")
+def test_otro_proceso_guarda_el_ticket_mientras_esperamos(cert_y_clave):
+    """Dos procesos piden a la vez: WSAA le da el ticket a uno y al otro le dice que ya hay."""
+    class _ElOtroGuardaDespuesDelLogin(_Almacen):
+        async def load(self, key):
+            if self.lecturas == 1:                # tras el login fallido, ya está guardado
+                self.tickets[key] = _ticket("DEL_OTRO")
+            return await super().load(key)
+
+    cert, key = cert_y_clave
+    wsaa.set_credential_store(_ElOtroGuardaDespuesDelLogin())
+    srv = _Wsaa("ya")
+    creds = _run(wsaa.authenticate(cert, key, "sandbox", transport=srv.transport))
+    assert creds.token == "DEL_OTRO" and srv.logins == 1
+    cached = wsaa.get_cached_credentials(_key(cert_y_clave))
+    assert cached is not None and cached.token == "DEL_OTRO"
+
+
+@pytest.mark.usefixtures("sin_esperas")
+def test_ticket_por_renovar_se_sigue_usando_si_wsaa_no_da_otro(cert_y_clave):
+    """A 5 minutos de vencer se intenta renovar; si WSAA dice que sigue vigente, se usa."""
+    cert, key = cert_y_clave
+    almacen = _Almacen()
+    almacen.tickets[_key(cert_y_clave)] = _ticket("POR_VENCER", vence_en=300)
+    wsaa.set_credential_store(almacen)
+    srv = _Wsaa("ya")
+    creds = _run(wsaa.authenticate(cert, key, "sandbox", transport=srv.transport))
+    assert creds.token == "POR_VENCER" and srv.logins == 1
+
+
+def test_ticket_vencido_se_renueva_y_se_reemplaza(cert_y_clave):
+    cert, key = cert_y_clave
+    almacen = _Almacen()
+    almacen.tickets[_key(cert_y_clave)] = _ticket("VIEJO", vence_en=-60)
+    wsaa.set_credential_store(almacen)
+    srv = _Wsaa()
+    creds = _run(wsaa.authenticate(cert, key, "sandbox", transport=srv.transport))
+    assert creds.token == "TOKEN1" and almacen.tickets[_key(cert_y_clave)].token == "TOKEN1"
+
+
+def test_un_ticket_por_servicio(cert_y_clave):
+    cert, key = cert_y_clave
+    almacen = _Almacen()
+    almacen.tickets[_key(cert_y_clave)] = _ticket("DE_WSFE")
+    wsaa.set_credential_store(almacen)
+    srv = _Wsaa()
+    creds = _run(wsaa.authenticate(cert, key, "sandbox", "ws_sr_constancia_inscripcion",
+                                   transport=srv.transport))
+    assert creds.token == "TOKEN1" and srv.logins == 1
+    assert almacen.tickets[_key(cert_y_clave, "ws_sr_constancia_inscripcion")].token == "TOKEN1"
+
+
+def test_si_el_almacen_falla_se_factura_igual(cert_y_clave):
+    cert, key = cert_y_clave
+    wsaa.set_credential_store(_Almacen(falla=True))
+    srv = _Wsaa()
+    creds = _run(wsaa.authenticate(cert, key, "sandbox", transport=srv.transport))
+    assert creds.token == "TOKEN1"
+
+
+def test_emitir_con_ticket_vigente_sin_guardar_queda_para_reintentar(cert_y_clave):
+    srv = _Wsaa("ya")
+    r = _run(arca.issue(_doc(), _issuer(cert_y_clave), transport=srv.transport))
+    assert r.status == FiscalStatus.ERROR and r.retryable
+    assert r.error_code == wsaa.ALREADY_AUTHENTICATED_CODE
+    assert "ya entregó un permiso vigente" in r.message
 
 
 # ── Notas de crédito y débito ───────────────────────────────────────────
