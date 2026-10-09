@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextvars
 import os
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import Any, Iterable, Optional, Type
 
 from sqlalchemy import event, inspect as sa_inspect
@@ -118,12 +119,19 @@ def _refresh_tenant_models() -> None:
                 branch_models.append(model)
     _TENANT_COMPANY_MODELS = tuple(company_models)
     _TENANT_BRANCH_MODELS = tuple(branch_models)
-    _LAST_SUBCLASS_COUNT = len(subclasses)
+    # Se cuenta igual que en `_ensure_models_fresh` (con repetidos: una clase que
+    # hereda de SQLModel por dos caminos aparece dos veces). Antes se guardaba
+    # `len(subclasses)` (sin repetidos), los números nunca coincidían y la lista
+    # de modelos se rearmaba en CADA consulta.
+    _LAST_SUBCLASS_COUNT = _subclass_count()
+
+
+def _subclass_count() -> int:
+    return sum(1 for _ in _iter_subclasses(SQLModel))
 
 
 def _ensure_models_fresh() -> None:
-    current = sum(1 for _ in _iter_subclasses(SQLModel))
-    if current != _LAST_SUBCLASS_COUNT:
+    if _subclass_count() != _LAST_SUBCLASS_COUNT:
         _refresh_tenant_models()
 
 
@@ -151,6 +159,63 @@ def _statement_requires_company(statement: Any) -> bool:
     return any(
         getattr(f, "c", None) is not None and "company_id" in f.c
         for f in _statement_froms(statement)
+    )
+
+
+# `get_final_froms()` arma el estado de compilación del ORM: ~1 ms por consulta. Dos
+# consultas con la misma clave de caché de SQLAlchemy tienen la misma forma (solo
+# cambian los valores) y por lo tanto los mismos FROM, así que la respuesta se
+# recuerda por esa clave. Tope simple: al llenarse se vacía.
+_REQUIRES_COMPANY_CACHE: dict[Any, bool] = {}
+_REQUIRES_COMPANY_CACHE_MAX = 4096
+
+
+def _statement_requires_company_cached(statement: Any) -> bool:
+    try:
+        cache_key = statement._generate_cache_key()
+        key = cache_key.key if cache_key is not None else None
+        hit = _REQUIRES_COMPANY_CACHE.get(key) if key is not None else None
+    except Exception:
+        key = None
+        hit = None
+    if hit is not None:
+        return hit
+    result = _statement_requires_company(statement)
+    if key is not None:
+        if len(_REQUIRES_COMPANY_CACHE) >= _REQUIRES_COMPANY_CACHE_MAX:
+            _REQUIRES_COMPANY_CACHE.clear()
+        _REQUIRES_COMPANY_CACHE[key] = result
+    return result
+
+
+# Las opciones del filtro se arman una vez por empresa (y por sucursal) y se reusan:
+# antes se armaban las ~84 en cada consulta (~3 ms). Cada opción guarda su propio
+# valor de empresa/sucursal en la closure de su lambda, que SQLAlchemy convierte en
+# parámetro al ejecutar, así que reusarlas entre consultas da el mismo SQL y los
+# mismos valores. La tupla de modelos va en la clave: si aparecen modelos nuevos
+# (`_refresh_tenant_models`), se arman de nuevo. ~90 KB por empresa y ~70 KB por
+# sucursal; con 128 de cada una, ~20 MB como máximo por proceso.
+@lru_cache(maxsize=128)
+def _company_criteria(models: tuple[Type[SQLModel], ...], company_id: int) -> tuple[Any, ...]:
+    return tuple(
+        with_loader_criteria(
+            model,
+            lambda cls: cls.company_id == company_id,
+            include_aliases=True,
+        )
+        for model in models
+    )
+
+
+@lru_cache(maxsize=128)
+def _branch_criteria(models: tuple[Type[SQLModel], ...], branch_id: int) -> tuple[Any, ...]:
+    return tuple(
+        with_loader_criteria(
+            model,
+            lambda cls: cls.branch_id == branch_id,
+            include_aliases=True,
+        )
+        for model in models
     )
 
 
@@ -192,7 +257,7 @@ def _apply_tenant_criteria(orm_execute_state) -> None:
         return
 
     statement = orm_execute_state.statement
-    if not _statement_requires_company(statement):
+    if not _statement_requires_company_cached(statement):
         return
 
     company_id, branch_id = _resolve_tenant_ids(orm_execute_state.execution_options)
@@ -218,27 +283,14 @@ def _apply_tenant_criteria(orm_execute_state) -> None:
     # (`_bid=branch_id`) NO se rastrea y hornea el PRIMER valor en la caché de
     # statements → al cambiar de sucursal se reutiliza el branch anterior y las
     # queries del nuevo branch devuelven vacío. (company_id/branch_id son
-    # constantes dentro de esta llamada, así que el late-binding es correcto.)
-    for model in _TENANT_COMPANY_MODELS:
-        statement = statement.options(
-            with_loader_criteria(
-                model,
-                lambda cls: cls.company_id == company_id,
-                include_aliases=True,
-            )
-        )
-
+    # constantes dentro de cada armado, así que el late-binding es correcto.)
+    # Ver `_company_criteria`: se arman una vez por empresa/sucursal y se agregan
+    # todas en una sola llamada (antes, una copia de la consulta por cada modelo).
+    criteria = _company_criteria(_TENANT_COMPANY_MODELS, company_id)
     if branch_id is not None:
-        for model in _TENANT_BRANCH_MODELS:
-            statement = statement.options(
-                with_loader_criteria(
-                    model,
-                    lambda cls: cls.branch_id == branch_id,
-                    include_aliases=True,
-                )
-            )
+        criteria += _branch_criteria(_TENANT_BRANCH_MODELS, branch_id)
 
-    orm_execute_state.statement = statement
+    orm_execute_state.statement = statement.options(*criteria)
 
 
 def _before_flush(session: Session, flush_context, instances) -> None:
