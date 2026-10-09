@@ -25,6 +25,7 @@ from typing import Any, Iterable, Optional, Type
 
 from sqlalchemy import event, inspect as sa_inspect
 from sqlalchemy.orm import Session, with_loader_criteria
+from sqlalchemy.sql.selectable import Join
 from sqlmodel import SQLModel
 
 TENANT_OPTION_COMPANY = "tenant_company_id"
@@ -155,10 +156,27 @@ def _statement_froms(statement: Any) -> Iterable[Any]:
     return ()
 
 
+def _leaf_froms(statement: Any) -> Iterable[Any]:
+    """FROM finales con los JOIN abiertos: `a JOIN b` da `a` y `b`.
+
+    Las columnas de un JOIN se llaman `saleitem_company_id`, `sale_company_id`…
+    (no `company_id`), así que mirando el JOIN entero ninguna consulta con join
+    pasaba el control y salía SIN el filtro automático.
+    """
+    stack = list(_statement_froms(statement))
+    while stack:
+        f = stack.pop()
+        if isinstance(f, Join):
+            stack.append(f.right)
+            stack.append(f.left)
+            continue
+        yield f
+
+
 def _statement_requires_company(statement: Any) -> bool:
     return any(
         getattr(f, "c", None) is not None and "company_id" in f.c
-        for f in _statement_froms(statement)
+        for f in _leaf_froms(statement)
     )
 
 
@@ -220,7 +238,7 @@ def _branch_criteria(models: tuple[Type[SQLModel], ...], branch_id: int) -> tupl
 
 
 def _statement_requires_branch(statement: Any) -> bool:
-    for f in _statement_froms(statement):
+    for f in _leaf_froms(statement):
         cols = getattr(f, "c", None)
         if cols is None or "branch_id" not in cols:
             continue
