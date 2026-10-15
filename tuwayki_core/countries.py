@@ -55,18 +55,21 @@ SUPPORTED_COUNTRIES: dict[str, dict] = {
         "phone_digits": [10, 13],
         "personal_id_length": (7, 8),
         "tax_id_length": (11, 11),
+        # BCRA, billetes y monedas vigentes (2026): el billete más alto es el de
+        # $20.000; no existen los de $100.000, $50.000 ni $5.000, ni la moneda
+        # de $50. Los billetes de $50, $20 y $10 casi no se usan pero siguen
+        # siendo de curso legal.
         "denominations": [
-            {"value": 100000, "label": "$100.000", "type": "bill"},
-            {"value": 50000,  "label": "$50.000",  "type": "bill"},
             {"value": 20000,  "label": "$20.000",  "type": "bill"},
             {"value": 10000,  "label": "$10.000",  "type": "bill"},
-            {"value": 5000,   "label": "$5.000",   "type": "bill"},
             {"value": 2000,   "label": "$2.000",   "type": "bill"},
             {"value": 1000,   "label": "$1.000",   "type": "bill"},
             {"value": 500,    "label": "$500",     "type": "bill"},
             {"value": 200,    "label": "$200",     "type": "bill"},
             {"value": 100,    "label": "$100",     "type": "bill"},
-            {"value": 50,     "label": "$50",      "type": "coin"},
+            {"value": 50,     "label": "$50",      "type": "bill"},
+            {"value": 20,     "label": "$20",      "type": "bill"},
+            {"value": 10,     "label": "$10",      "type": "bill"},
             {"value": 10,     "label": "$10",      "type": "coin"},
             {"value": 5,      "label": "$5",       "type": "coin"},
             {"value": 2,      "label": "$2",       "type": "coin"},
@@ -93,6 +96,7 @@ SUPPORTED_COUNTRIES: dict[str, dict] = {
             {"value": 10,   "label": "$10",   "type": "bill"},
             {"value": 5,    "label": "$5",    "type": "bill"},
             {"value": 1,    "label": "$1",    "type": "bill"},
+            {"value": 1,    "label": "$1",    "type": "coin"},  # muy usada en Ecuador
             {"value": 0.50, "label": "$0.50", "type": "coin"},
             {"value": 0.25, "label": "$0.25", "type": "coin"},
             {"value": 0.10, "label": "$0.10", "type": "coin"},
@@ -172,6 +176,7 @@ SUPPORTED_COUNTRIES: dict[str, dict] = {
             {"value": 100,  "label": "$100",   "type": "bill"},
             {"value": 50,   "label": "$50",    "type": "bill"},
             {"value": 20,   "label": "$20",    "type": "bill"},
+            {"value": 20,   "label": "$20",    "type": "coin"},  # circula junto al billete
             {"value": 10,   "label": "$10",    "type": "coin"},
             {"value": 5,    "label": "$5",     "type": "coin"},
             {"value": 2,    "label": "$2",     "type": "coin"},
@@ -226,7 +231,9 @@ SUPPORTED_COUNTRIES: dict[str, dict] = {
             {"value": 200,  "label": "$U200",   "type": "bill"},
             {"value": 100,  "label": "$U100",   "type": "bill"},
             {"value": 50,   "label": "$U50",    "type": "bill"},
-            {"value": 20,   "label": "$U20",    "type": "coin"},
+            {"value": 20,   "label": "$U20",    "type": "bill"},
+            # No hay moneda de $U20; la de $U50 existe (2011) aunque se ve poco.
+            {"value": 50,   "label": "$U50",    "type": "coin"},
             {"value": 10,   "label": "$U10",    "type": "coin"},
             {"value": 5,    "label": "$U5",     "type": "coin"},
             {"value": 2,    "label": "$U2",     "type": "coin"},
@@ -272,13 +279,18 @@ SUPPORTED_COUNTRIES: dict[str, dict] = {
         "phone_digits": [10, 11],
         "personal_id_length": (6, 9),
         "tax_id_length": (9, 10),
+        # Cono del bolívar digital (BCV, 2021) + billetes de Bs.200 y Bs.500 (2024).
         "denominations": [
-            {"value": 100, "label": "Bs.100", "type": "bill"},
-            {"value": 50,  "label": "Bs.50",  "type": "bill"},
-            {"value": 20,  "label": "Bs.20",  "type": "bill"},
-            {"value": 10,  "label": "Bs.10",  "type": "bill"},
-            {"value": 5,   "label": "Bs.5",   "type": "bill"},
-            {"value": 1,   "label": "Bs.1",   "type": "coin"},
+            {"value": 500,  "label": "Bs.500",  "type": "bill"},
+            {"value": 200,  "label": "Bs.200",  "type": "bill"},
+            {"value": 100,  "label": "Bs.100",  "type": "bill"},
+            {"value": 50,   "label": "Bs.50",   "type": "bill"},
+            {"value": 20,   "label": "Bs.20",   "type": "bill"},
+            {"value": 10,   "label": "Bs.10",   "type": "bill"},
+            {"value": 5,    "label": "Bs.5",    "type": "bill"},
+            {"value": 1,    "label": "Bs.1",    "type": "coin"},
+            {"value": 0.50, "label": "Bs.0,50", "type": "coin"},
+            {"value": 0.25, "label": "Bs.0,25", "type": "coin"},
         ],
     },
 }
