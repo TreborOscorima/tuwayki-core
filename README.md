@@ -36,6 +36,7 @@ formateo de moneda, exportaciones, timezone, etc.) reutilizadas por los tres sis
 | `tuwayki_core.utils.rate_limit` | Rate limiting (Redis) |
 | `tuwayki_core.utils.db` · `env` · `logger` · `performance` | Infra: conexión DB, entorno, logging, métricas |
 | `tuwayki_core.fiscal` | **Facturación electrónica** compartida (ver abajo) |
+| `tuwayki_core.invoice_ocr` | **Lectura de facturas de compra con IA** (Gemini) para SHOP y LIFE (ver abajo) |
 
 ### Facturación electrónica (`tuwayki_core.fiscal`)
 
@@ -53,6 +54,24 @@ de la empresa y guarda el `IssueResult` en su propia tabla.
 
 Pendiente de probar contra los entornos reales: requiere una cuenta de Nubefact (RUC de la
 empresa) y un certificado de homologación de ARCA (CUIT). Tests: `pytest tests/`.
+
+### Lectura de facturas con IA (`tuwayki_core.invoice_ocr`)
+
+Lee la foto o el PDF de una factura, boleta o ticket del proveedor y devuelve el encabezado y
+los ítems (`extract_invoice` → `InvoiceExtraction`) para precargar la compra. Sin base de datos:
+cada sistema busca el proveedor y los productos y arma su borrador. SHOP
+(`app/services/invoice_ocr_service.py`) y LIFE (`clinica_app/services/ocr_comprobantes.py`) solo
+reexportan desde acá: un arreglo llega a los dos al subir el SHA.
+
+- Cadena de modelos: primario + respaldos. 35 s por modelo y 110 s en total; un 503 (saturado),
+  un 404 (retirado) o una falta de respuesta pasan al siguiente; solo un 429 se reintenta.
+- La clave va en el encabezado `x-goog-api-key`, nunca en la dirección ni en el log.
+
+| Variable | Uso |
+|---|---|
+| `GEMINI_API_KEY` | Clave de Google. Sin ella la lectura avisa y la carga a mano sigue igual |
+| `GEMINI_OCR_MODEL` | Modelo primario (opcional, `gemini-flash-lite-latest`) |
+| `GEMINI_OCR_FALLBACKS` | Respaldos en orden, separados por comas (opcional; vacía = lista de `_FALLBACK_MODELS`). Cuando Google retira o satura un modelo, se cambia la variable sin tocar código |
 
 ### Dependencias
 
